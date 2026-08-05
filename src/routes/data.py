@@ -1,5 +1,6 @@
 # cleaned imports
 
+from .schemes.data import ProcessRequest
 from fastapi import FastAPI, APIRouter, Depends, UploadFile, status
 from fastapi.responses import JSONResponse
 import os
@@ -10,7 +11,6 @@ import aiofiles
 import logging
 logger = logging.getLogger('uvicron.error')
 from src.models.enums.ResponseEnums import ResponseSignal
-
 data_router = APIRouter(
     prefix="/api/v1/data",
     tags=["api_v1", "data"],
@@ -55,3 +55,9 @@ async def upload_data(
             "file_id": file_id
         }
     )
+
+
+@data_router.post("/process/{project_id}")
+async def process_endpoint(project_id: str, Process_Request: ProcessRequest):
+     file_id = Process_Request.file_id
+     return file_id

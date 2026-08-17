@@ -610,3 +610,198 @@ Requirements:
 - Finally, write a short comparison doc (for yourself) answering: *Which was easier to model? Which was easier to query? What broke or felt awkward in each? What would happen if this needed to scale to 10 million orders?*
 
 This project is designed so you can't just memorize syntax — you're forced to make (and defend) the exact modeling decisions this tutorial explained.
+==============
+Docker basics 
+# Docker — Basic Knowledge & Core Commands
+
+---
+
+## 1. What is Docker and why does it exist?
+
+Before Docker, deploying an app meant matching the exact versions of the OS, runtime, and libraries between your laptop and the server ("it works on my machine" problem).
+
+**Docker solves this by packaging an application together with everything it needs to run** (code, runtime, system libraries, config) into a single unit called a **container**. That container runs the same way everywhere — your laptop, a teammate's machine, or a production server.
+
+### Container vs Virtual Machine
+
+```
+Virtual Machine                     Docker Container
++-------------------+               +-------------------+
+| App                |               | App                |
+| Bins/Libs          |               | Bins/Libs          |
+| Guest OS (full)    |               +-------------------+
++-------------------+               | Docker Engine       |
+| Hypervisor         |               +-------------------+
++-------------------+               | Host OS             |
+| Host OS            |               +-------------------+
++-------------------+
+```
+
+- A **VM** virtualizes an entire operating system → heavy, slow to start (minutes).
+- A **container** shares the host machine's OS kernel and only isolates the application layer → lightweight, starts in seconds.
+
+---
+
+## 2. Core Concepts
+
+| Term | What it is |
+|---|---|
+| **Image** | A read-only blueprint/template for a container (like a snapshot: app + dependencies + OS files). Built once, run many times. |
+| **Container** | A running (or stopped) *instance* of an image. Same relationship as a class → object. |
+| **Dockerfile** | A text file with instructions describing how to build an image. |
+| **Registry** | A place to store/share images (e.g., Docker Hub). |
+| **Volume** | Persistent storage that lives outside the container's writable layer, so data survives container deletion. |
+| **Network** | Virtual network Docker creates so containers can talk to each other. |
+
+```
+Dockerfile  --(docker build)-->  Image  --(docker run)-->  Container
+```
+
+---
+
+## 3. The Dockerfile (basic example)
+
+```dockerfile
+FROM node:18-alpine       # base image to start from
+WORKDIR /app              # working directory inside the container
+COPY package*.json ./     # copy dependency files first (caching benefit)
+RUN npm install            # install dependencies
+COPY . .                   # copy the rest of the app code
+EXPOSE 3000                 # document which port the app listens on
+CMD ["node", "server.js"]   # command to run when container starts
+```
+
+**Why copy `package.json` before the rest of the code?** Docker caches each layer. If only your app code changes (not dependencies), Docker reuses the cached `npm install` layer instead of reinstalling everything — much faster builds.
+
+---
+
+## 4. Basic Operations (Commands)
+
+### Images
+
+```bash
+docker build -t myapp:1.0 .        # build an image from a Dockerfile in current dir
+docker images                       # list local images
+docker rmi myapp:1.0                # remove an image
+docker pull nginx                   # download an image from a registry
+docker push myrepo/myapp:1.0        # upload an image to a registry
+```
+
+### Containers
+
+```bash
+docker run myapp:1.0                        # run a container from an image
+docker run -d -p 8080:80 nginx               # run detached, map host:8080 -> container:80
+docker run -it ubuntu bash                   # run interactively with a terminal
+docker ps                                    # list running containers
+docker ps -a                                 # list ALL containers (including stopped)
+docker stop <container_id>                   # gracefully stop a container
+docker start <container_id>                  # start a stopped container
+docker restart <container_id>                # restart a container
+docker rm <container_id>                     # remove a stopped container
+docker logs <container_id>                   # view container output/logs
+docker exec -it <container_id> bash          # open a shell inside a running container
+```
+
+**Common flags:**
+| Flag | Meaning |
+|---|---|
+| `-d` | detached mode (run in background) |
+| `-p host:container` | port mapping |
+| `-it` | interactive + terminal (needed for shells) |
+| `--name` | give the container a custom name |
+| `--rm` | auto-remove container when it stops |
+| `-v host_path:container_path` | mount a volume |
+| `-e KEY=value` | set an environment variable |
+
+Example combining several:
+```bash
+docker run -d --name web -p 8080:80 -e ENV=production -v ./data:/app/data myapp:1.0
+```
+
+### Volumes (persisting data)
+
+```bash
+docker volume create mydata          # create a named volume
+docker volume ls                     # list volumes
+docker run -v mydata:/app/data myapp # attach volume to a container
+docker volume rm mydata              # delete a volume
+```
+
+Without a volume, any data written inside a container disappears when the container is removed — volumes keep it safe (e.g., a database's files).
+
+### Networks
+
+```bash
+docker network create mynet          # create a custom network
+docker network ls                    # list networks
+docker run --network mynet myapp     # attach a container to it
+```
+
+Containers on the same network can reach each other by container name (like a hostname) — no need for hardcoded IPs.
+
+### Cleanup
+
+```bash
+docker system prune                  # remove unused containers, networks, dangling images
+docker container prune               # remove all stopped containers
+docker image prune                   # remove unused images
+```
+
+---
+
+## 5. Docker Compose (multi-container apps)
+
+Most real apps need more than one container (e.g., app + database). **Docker Compose** lets you define and run them together with one file.
+
+```yaml
+# docker-compose.yml
+services:
+  web:
+    build: .
+    ports:
+      - "8080:80"
+    depends_on:
+      - db
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: example
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+
+volumes:
+  dbdata:
+```
+
+```bash
+docker compose up -d       # start all services in background
+docker compose down        # stop and remove them
+docker compose logs -f     # follow logs from all services
+docker compose ps          # list running services
+```
+
+---
+
+## 6. Quick Mental Model
+
+> **Image = the recipe. Container = the dish made from the recipe. You can make many dishes (containers) from one recipe (image), and they won't interfere with each other.**
+
+---
+
+## 7. Common Beginner Mistakes
+
+- Forgetting `-p` to map ports, then wondering why `localhost:8080` doesn't work.
+- Not using volumes for databases, then losing all data after `docker rm`.
+- Putting `COPY . .` before `RUN npm install`, causing the dependency layer to rebuild on every code change (slow builds).
+- Confusing `docker stop` (keeps the container, can restart) with `docker rm` (deletes it permanently).
+- Running everything as `root` inside containers without thinking about it (fine for learning, a security concern in production).
+
+---
+
+## 8. Practical Exercises
+
+1. Write a `Dockerfile` for a simple Python/Node "Hello World" app and run it, mapping a port so you can open it in a browser.
+2. Run a `postgres` container with a named volume, stop and remove the container, then start a new one attached to the same volume — verify your data is still there.
+3. Write a `docker-compose.yml` that runs your app + a database together, and connect the app to the database using the service name as the hostname.
+4. Practice the container lifecycle: `run` → `stop` → `start` → `logs` → `exec -it ... bash` → `rm`.

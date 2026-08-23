@@ -1,5 +1,7 @@
-from helpers import get_settings , settings
-class BaseDateModel:
-  def __init__ (self,db_clint:object):
-    self.db_clint = db_clint
-    self.app_settings = get_settings
+from src.helpers import get_settings, settings
+
+
+class BaseDataModel:
+    def __init__(self, db_client: object):
+        self.db_client = db_client
+        self.app_settings = get_settings()

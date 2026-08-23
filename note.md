@@ -805,3 +805,154 @@ docker compose ps          # list running services
 2. Run a `postgres` container with a named volume, stop and remove the container, then start a new one attached to the same volume — verify your data is still there.
 3. Write a `docker-compose.yml` that runs your app + a database together, and connect the app to the database using the service name as the hostname.
 4. Practice the container lifecycle: `run` → `stop` → `start` → `logs` → `exec -it ... bash` → `rm`.
+
+# mini-RAG — Troubleshooting Log
+
+This file documents real problems hit while getting this project running,
+what caused them, and how they were fixed — so future-me (or anyone else
+picking this up) doesn't have to re-debug from scratch.
+
+Last updated: 2026-08-24
+
+---
+
+## Quick checklist before asking "why won't it start"
+
+1. `conda activate mini-rag` — right environment active?
+2. `pip install -r requirements.txt` — deps installed in *this* env?
+3. `.env` exists and has every field `Settings` in `src/helpers/config.py` expects?
+4. `docker ps` — is `mongodb` container `Up` (not `Restarting` or missing)?
+5. Run the server from the **project root** (`~/mini-RAG`), not from inside `src/`.
+
+---
+
+## 1. Environment / dependency issues
+
+### `ModuleNotFoundError: No module named 'fastapi'` (or uvicorn, etc.)
+**Cause:** Dependencies never installed in the active Python environment.
+**Fix:**
+```bash
+conda activate mini-rag
+pip install -r requirements.txt
+```
+**Avoid it:** Always run `pip install -r requirements.txt` right after
+cloning, switching branches with new deps, or creating a fresh env.
+
+---
+
+## 2. Config / import bugs (typos)
+
+These all shared the same root cause: a manually-typed name that didn't
+exactly match the real one (case, spelling, or missing `src.` prefix).
+Every single one of these would have been caught instantly by an IDE
+with Python linting/autocomplete enabled — see "Prevention" at the
+bottom of this file.
+
+| Symptom | Root cause | Fix |
+|---|---|---|
+| `PydanticUserError: non-annotated attribute MONGODB_URL` | `MONGODB_URL = str` instead of `MONGODB_URL: str` in `Settings` | Use `:` for type annotations, not `=` |
+| `ModuleNotFoundError: No module named 'models'` | `from models.ProjectModel import ...` missing `src.` prefix | `from src.models.ProjectModel import ...` |
+| `ModuleNotFoundError: No module named 'src.models.BaseDateModel'` | File is `BaseDataModel.py` but import said `BaseDateModel` | Match the import to the actual filename |
+| `ImportError: cannot import name 'objectid' from 'bson.objectid'` | bson's class is `ObjectId` (capital O, capital I), not `objectid` | `from bson.objectid import ObjectId` |
+| `PydanticSchemaGenerationError` for `ObjectId` | Pydantic doesn't know how to validate a raw `bson.ObjectId` type | Add `class Config: arbitrary_types_allowed = True` inside the model (and spell `Config`/`arbitrary_types_allowed` correctly!) |
+| `ImportError: cannot import name 'data_chunk'` | Class defined as `datachnuk` (typo) but imported as `data_chunk` | Renamed the class to match the filename: `class data_chunk(BaseModel)` |
+| `ImportError: cannot import name 'enum' from 'enum'` | `from enum import enum` — Python's stdlib class is `Enum` | `from enum import Enum` |
+| `ImportError: cannot import name 'get_settings' from 'src.helpers'` | `src/helpers/__init__.py` was empty | Added `from .config import get_settings` + `settings = get_settings()` |
+| `NameError`/missing `await` on `get_project_or_create_one(...)` | Called an `async def` function without `await` | Always `await` coroutines — this class of bug won't raise until the endpoint actually runs, so it's easy to miss until tested live |
+
+**Avoid it:** See "Prevention" section below — this whole category is
+what static analysis tools exist for.
+
+---
+
+## 3. MongoDB / Docker issues
+
+### `pymongo.errors.ServerSelectionTimeoutError: Connection refused`
+**Cause chain (in the order we hit them):**
+
+1. **Wrong port in `.env`** — `MONGODB_URL` pointed at `27007` while
+   Mongo listens on `27017` (typo, likely a slipped finger on the keyboard).
+   → Match the port in `.env` to the port Docker actually publishes.
+
+2. **Kernel incompatibility** — `mongo:8.0` refused to start on
+   Linux kernel 6.19+ (`MongoDB cannot start: ... known incompatibility ...`,
+   see [SERVER-121912](https://jira.mongodb.org/browse/SERVER-121912)).
+   → Downgraded to `mongo:7.0`.
+
+3. **Typo in docker-compose.yml** — volume was `./mongodb:/data/bd`
+   (missing the `a` in `db`). Harmless-looking typo, but MongoDB then
+   tries to create its real data dir somewhere else and things get weird.
+   → Always double check bind-mount paths after typing `/data/db`.
+
+4. **`docker compose` (v2, space) not installed** — only the old
+   `docker-compose` (v1, hyphen, version 1.29.2) was available.
+   → Either install `docker-compose-plugin`, or use the hyphenated
+   command consistently. Don't mix them.
+
+5. **THE BIG ONE — `Permission denied: "/data/db/journal"`.**
+   Root cause: the project directory (`~/mini-RAG`, under `/home`) sits
+   on a **`fuseblk`** filesystem (an NTFS/exFAT partition mounted via
+   FUSE — common on dual-boot machines). This filesystem type does
+   **not** support real Unix ownership/permissions, no matter what
+   `chown`/`chmod` you run on the host — the container's MongoDB
+   process can never get write access to a bind-mounted subfolder
+   there.
+   **Fix that actually worked:** stop using a bind mount
+   (`./Docker/mongodb:/data/db`) and switch to a **named Docker
+   volume** instead:
+   ```yaml
+   volumes:
+     - mongodb_data:/data/db
+   volumes:
+     mongodb_data:
+   ```
+   Named volumes live under `/var/lib/docker/volumes` on the actual
+   root filesystem (`ext4` here), so this sidesteps the whole
+   fuseblk problem.
+   **Confirmed by:** testing a bind mount to `/tmp` (which *is* ext4)
+   and seeing the permission error disappear immediately — proving
+   the filesystem, not Docker or MongoDB, was the actual cause.
+
+6. **`docker-compose` 1.29.2 bug** — `ERROR: for mongodb
+   'ContainerConfig'` / `KeyError: 'ContainerConfig'` when trying to
+   recreate a container. Known bug in old docker-compose with newer
+   image formats. Worked around by removing all stale containers and
+   using `docker run` directly instead of `docker-compose up`.
+
+**Avoid all of this going forward:**
+- Keep Docker projects (anything with volumes) on a native Linux
+  filesystem (`ext4`), never on an NTFS/exFAT/fuseblk partition.
+- Default to **named volumes** for any database container — never
+  bind-mount a data directory unless you have a specific reason to.
+- Keep `docker compose` (the plugin) up to date:
+  `sudo apt install docker-compose-plugin`
+- Pin the Mongo image version in `docker-compose.yml` and re-check
+  compatibility notes when bumping the OS/kernel.
+
+---
+
+## Prevention — the single biggest lever
+
+Almost every bug in section 2 (and a few in section 3) was a typo that
+a proper dev setup would have caught in seconds, before ever running
+the server:
+
+1. **Use an IDE with Python language support** (VS Code + Python
+   extension + Pylance, or PyCharm). This alone would have flagged:
+   - `MONGODB_URL = str` (assignment where an annotation was expected)
+   - `from models.X import Y` (unresolved import, red squiggle)
+   - `BaseDateModel` vs `BaseDataModel` (autocomplete would suggest
+     the real name)
+   - `objectid` vs `ObjectId` (autocomplete again)
+   - missing `await` on an async call (Pylance warns about this)
+
+2. **Add a pre-commit hook** that runs a linter before every commit —
+   see `.pre-commit-config.yaml` in this same folder. Catches issues
+   even if the IDE warning gets ignored.
+
+3. **Run `python -c "import src.main"` locally before pushing** — a
+   cheap smoke test that catches import errors in ~1 second, instead
+   of finding out via a failed deploy.
+
+4. **Keep this file updated.** Next time something breaks, add it
+   here before you forget the fix.

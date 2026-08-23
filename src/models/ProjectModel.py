@@ -23,6 +23,24 @@ class projectModel(BaseDateModel):
          project = project(project_id=project_id)
          project = await self.create_project(project=project)
          return project
-      return project(**record)
+      return project(** record)
+   async def get_all_projects(self ,page: int=1 , page_size :int=10):
+
+   #count totla number of documnets 
+    total_documnets = await self.collection.count_documnets({})
+    total_page = total_documnets // page_size
+    if total_documnets % page_size >0:
+       total_pages +=1
+   #collect  data 
+    cursor =self.collection.find().skip((page-1)*page_size).limit(page_size)
+    # curser 
+    projects =[]
+    async for documnets in cursor:
+       projects.append(
+           project(**documnets)
+       )
+       return projects,total_pages
+ 
+    
 
 

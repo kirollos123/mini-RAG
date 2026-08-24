@@ -101,6 +101,7 @@ async def process_endpoint(
     file_id = process_request.file_id
     chunk_size = process_request.chunk_size
     overlap_size = process_request.overlap_size
+    do_reset = process_request.do_reset
 
     project_model = ProjectModel(
         db_client=request.app.db_client
@@ -132,6 +133,14 @@ async def process_endpoint(
                 "signal": ResponseSignal.PROCESSING_FAILED.value
             }
         )
+    chunk_model = ChunkModel(
+        db_client=request.app.db_client
+    )
+
+    if do_reset == 1:
+        _ = await chunk_model.delete_chunks_by_project_id(
+            project_id=project.id
+        )
 
     file_chunks_records = [
         DataChunk(
@@ -142,10 +151,6 @@ async def process_endpoint(
         )
         for i, chunk in enumerate(file_chunks)
     ]
-
-    chunk_model = ChunkModel(
-        db_client=request.app.db_client
-    )
 
     no_records = await chunk_model.insert_many_chunks(
         chunks=file_chunks_records

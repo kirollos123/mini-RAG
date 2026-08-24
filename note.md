@@ -956,3 +956,416 @@ the server:
 
 4. **Keep this file updated.** Next time something breaks, add it
    here before you forget the fix.
+   # 📒 Notebook: SQL vs NoSQL (MongoDB) — Mini-RAG Database Schema
+
+---
+
+## 1. Overview
+
+- A **database schema** = how data is organized, stored, and related.
+- Two major approaches:
+  - **SQL (Relational)** → tables, rows, columns, relationships
+  - **NoSQL (MongoDB)** → collections and documents
+- Mini-RAG uses **MongoDB** because it works naturally with document-oriented data (text chunks + metadata).
+
+---
+
+## 2. SQL Structure
+
+```
+Database
+│
+├── Table
+│   ├── Columns
+│   └── Rows
+```
+
+Example:
+
+```
+mini_rag
+├── projects (id, project_id)
+└── chunks (id, chunk_text, chunk_order, project_id)
+```
+
+```sql
+CREATE TABLE chunks (
+    id INTEGER PRIMARY KEY,
+    chunk_text TEXT NOT NULL,
+    chunk_order INTEGER NOT NULL,
+    project_id INTEGER
+);
+```
+
+➡️ SQL has a **predefined, fixed schema**.
+
+---
+
+## 3. MongoDB Structure
+
+```
+Database
+│
+├── Collection
+│   ├── Document
+│   ├── Document
+```
+
+### 🔁 Terminology Mapping
+
+| Relational Database | MongoDB |
+|---|---|
+| Database | Database |
+| Table | Collection |
+| Row | Document |
+| Column | Field |
+| Primary Key | `_id` |
+| Foreign Key | Reference stored in a field |
+| Fixed Schema | Flexible Schema |
+
+---
+
+## 4. Database (`mini_rag`)
+
+```
+MONGODB_DATABASE=mini_rag
+```
+
+```python
+app.db_client = app.mongo_conn[settings.MONGODB_DATABASE]
+```
+
+```
+MongoDB Server
+      └── mini_rag
+```
+
+---
+
+## 5. Collections
+
+Two collections: `projects`, `chunks`.
+
+```python
+self.collection = self.db_client[
+    DatabaseEnum.COLLECTION_CHUNK_NAME.value
+]
+```
+
+Inspect via mongosh:
+```js
+db.chunks.find()
+```
+
+---
+
+## 6. Documents
+
+Example chunk document:
+
+```json
+{
+    "_id": "ObjectId(...)",
+    "chunk_text": "Python is a programming language...",
+    "chunk_metadata": { "source": "CV.pdf", "page": 1 },
+    "chunk_order": 1,
+    "chunk_project_id": "ObjectId(...)"
+}
+```
+
+Unlike SQL rows, documents can have:
+- Nested objects
+- Arrays
+- Mixed value types
+- Flexible structure
+
+---
+
+## 7. `_id` in MongoDB
+
+- Auto-assigned unique identifier: `_id: ObjectId(...)`
+- SQL equivalent: `id PRIMARY KEY`
+- Pydantic mapping:
+
+```python
+id: Optional[ObjectId] = Field(None, alias="_id")
+```
+
+| Python | MongoDB |
+|---|---|
+| `id` | `_id` |
+
+---
+
+## 8. MongoDB Schema vs Pydantic Schema
+
+- MongoDB = **flexible schema** by default (documents in one collection don't need identical fields).
+- **Pydantic** enforces application-level structure/validation on top of that flexibility.
+
+```python
+class DataChunk(BaseModel):
+    id: Optional[ObjectId] = Field(None, alias="_id")
+    chunk_text: str = Field(..., min_length=1)
+    chunk_metadata: dict
+    chunk_order: int = Field(..., gt=0)
+    chunk_project_id: ObjectId
+```
+
+**Flow:**
+```
+Python Application → Pydantic Schema → Validation → MongoDB
+```
+
+---
+
+## 9–11. Mini-RAG Collections & Models
+
+**Collections:** `projects`, `chunks`
+
+### Project Model
+```python
+class Project(BaseModel):
+    id: Optional[ObjectId] = Field(None, alias="_id")
+    project_id: str = Field(..., min_length=1)
+```
+```json
+{ "_id": "ObjectId(6a8b7fe4...)", "project_id": "1" }
+```
+
+### Chunk Model
+```python
+class DataChunk(BaseModel):
+    id: Optional[ObjectId] = Field(None, alias="_id")
+    chunk_text: str = Field(..., min_length=1)
+    chunk_metadata: dict
+    chunk_order: int = Field(..., gt=0)
+    chunk_project_id: ObjectId
+```
+```json
+{
+    "_id": "ObjectId(...)",
+    "chunk_text": "Software development student...",
+    "chunk_metadata": { "producer": "Skia/PDF", "total_pages": 2, "format": "PDF 1.4", "title": "CV", "page": 0 },
+    "chunk_order": 1,
+    "chunk_project_id": "ObjectId(6a8b7fe4...)"
+}
+```
+
+---
+
+## 12. `chunk_text` — Splitting the PDF
+
+The original PDF is **not** stored as one blob — it's split into chunks, each becoming its own document.
+
+```
+CV.pdf → Chunk 1 … Chunk 6 → 6 MongoDB documents
+```
+
+API response after processing:
+```json
+{ "signal": "PROCESSING_SUCCES", "records": 6 }
+```
+
+---
+
+## 13. `chunk_order`
+
+Stores the chunk's position (1, 2, 3, …) → preserves original document order.
+
+---
+
+## 14. `chunk_metadata`
+
+Nested object grouping metadata instead of separate columns:
+
+```json
+{
+    "source": "/path/to/CV.pdf",
+    "total_pages": 2,
+    "format": "PDF 1.4",
+    "title": "CV",
+    "page": 0
+}
+```
+
+Useful for: filtering, retrieval, source tracking, page ID, citation generation.
+
+---
+
+## 15–16. Project ↔ Chunk Relationship
+
+```
+Project (1) ──── (N) Chunks
+```
+
+Stored via:
+```
+chunk_project_id: ObjectId("6a8b7fe4...")
+```
+
+- Conceptually like a **foreign key**, but **not enforced** by MongoDB — the app must maintain it.
+
+| SQL | MongoDB |
+|---|---|
+| `chunks.project_id → projects.id` | `chunks.chunk_project_id → projects._id` |
+
+---
+
+## 17. Full Data Flow (Upload → MongoDB)
+
+```
+User
+ → Upload PDF (FastAPI)
+ → Upload Controller (generate file ID, save to filesystem)
+ → Process Endpoint
+ → ProcessController (select loader, load doc, split into chunks)
+ → DataChunk objects
+ → ChunkModel
+ → insert_many_chunks()
+ → MongoDB → chunks collection
+```
+
+---
+
+## 18. Chunk Insertion (Bulk)
+
+```python
+async def insert_many_chunks(self, chunks: list, batch_size: int = 100):
+    operations = [
+        InsertOne(chunk.dict(by_alias=True, exclude_unset=True))
+        for chunk in batch
+    ]
+    await self.collection.bulk_write(operations)
+```
+
+➡️ Efficient bulk insert instead of one request per chunk.
+
+---
+
+## 19. Resetting Chunks
+
+```python
+async def delete_chunks_by_project_id(self, project_id: ObjectId):
+    result = await self.collection.delete_many({"chunk_project_id": project_id})
+    return result.deleted_count
+```
+
+Flow:
+```
+Existing Chunks → Delete → Await completion → Process new doc → Insert new chunks
+```
+
+⚠️ `await` is critical — without it, deletion isn't guaranteed to finish before new inserts.
+
+---
+
+## 20. Querying with `mongosh`
+
+```js
+use mini_rag
+show collections
+db.chunks.countDocuments()
+
+db.chunks.countDocuments({
+    chunk_project_id: ObjectId("6a8b7fe4275804b9ed0cd8fd")
+})
+
+db.chunks.find({
+    chunk_project_id: ObjectId("6a8b7fe4275804b9ed0cd8fd")
+}).sort({ chunk_order: 1 })
+```
+
+---
+
+## 21. Checking for Duplicate Chunks
+
+```js
+db.chunks.aggregate([
+    { $match: { chunk_project_id: ObjectId("6a8b7fe4275804b9ed0cd8fd") } },
+    { $group: { _id: "$chunk_order", count: { $sum: 1 } } },
+    { $sort: { _id: 1 } }
+])
+```
+
+- **Expected (healthy):** each `chunk_order` → count `1`
+- **Problem sign:** counts like `9, 9, 9…` → duplicate chunks exist
+
+---
+
+## 22. Key Design Lesson: Reference vs Embed
+
+The real SQL vs MongoDB difference isn't "tables vs collections" — it's **how you model relationships**.
+
+**Referenced (used in Mini-RAG):**
+```json
+{ "chunk_project_id": "ObjectId(...)" }
+```
+
+**Embedded (alternative):**
+```json
+{
+    "project_id": "1",
+    "chunks": [
+        { "text": "...", "order": 1 },
+        { "text": "...", "order": 2 }
+    ]
+}
+```
+
+✅ Mini-RAG uses **referencing** because a project can have many chunks, and chunks are frequently queried independently.
+
+---
+
+## 23. Final Architecture Diagram
+
+```
+                    MongoDB
+                       │
+                   mini_rag
+             ┌─────────┴─────────┐
+             ▼                   ▼
+         projects             chunks
+             │                   │
+             ▼            ┌──────┴────────┐
+           _id             ▼        ▼        ▼
+       project_id   chunk_text  chunk_order  chunk_metadata
+                                              chunk_project_id
+```
+
+**Fundamental relationship:** `1 Project → N Chunks`
+
+---
+
+## 24. Key Takeaways (Cheat Sheet)
+
+**MongoDB hierarchy:**
+```
+MongoDB → Database → Collection → Document → Field
+```
+
+**SQL hierarchy:**
+```
+SQL → Database → Table → Row → Column
+```
+
+**Mini-RAG collections:**
+```
+mini_rag
+├── projects
+└── chunks
+```
+
+**Each chunk document contains:**
+- `_id`
+- `chunk_text`
+- `chunk_metadata`
+- `chunk_order`
+- `chunk_project_id`
+
+**Overall pipeline:**
+```
+PDF → Loader → Document → Text Splitter → Chunks
+    → Pydantic DataChunk → ChunkModel → MongoDB → chunks Collection
+```
+
+> 💡 **Big picture:** Pydantic gives the app structure & validation; MongoDB gives flexible, scalable document storage. Together they balance rigor with flexibility — ideal for a RAG ingestion pipeline.

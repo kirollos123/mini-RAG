@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 
 import aiofiles
 import logging
-
+import os
 from src.helpers.config import get_settings, Settings
 from src.controllers import DataController
 from src.controllers import projectController
@@ -15,8 +15,9 @@ from src.controllers import processController
 from src.models.ProjectModel import ProjectModel
 from src.models.ChunkModel import ChunkModel
 from src.models.enums.ResponseEnums import ResponseSignal
-from src.models.db_schemes import DataChunk
-
+from src.models.db_schemes import DataChunk, Asset
+from src.models.AssetModel import AssetModel
+from src.models.enums.AssetTypeEnum import AssetTypeEnum
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -71,9 +72,7 @@ async def upload_data(
                 await f.write(chunk)
 
     except Exception as e:
-        logger.error(
-            f"Error while uploading file: {e}"
-        )
+        logger.error(f"Error while uploading file: {e}")
 
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -81,13 +80,23 @@ async def upload_data(
                 "signal": ResponseSignal.FILE_TYPE_NOT_SUPPORTED.value
             }
         )
-
+# store the assets into database
+    asset_model = await AssetModel.create_instance(
+        db_client=request.app.db_client
+    )
+    asset_resource= Asset(
+        asset_project_id=project.id,
+        asset_type=AssetTypeEnum.FILE.value,
+        asset_name=file_id,
+        asset_size=os.path.getsize(file_path)
+    )
+    asset_record= await asset_model.create_asset(asset=asset_resource)
     return JSONResponse(
         status_code=status.HTTP_200_OK,
         content={
             "signal": ResponseSignal.FILE_UPLOADED.value,
-            "file_id": file_id,
-            "project_id": str(project.id)
+            "file_id": str(asset_record.id),
+            "project_id": str(project.id),
         }
     )
 
@@ -103,7 +112,7 @@ async def process_endpoint(
     overlap_size = process_request.overlap_size
     do_reset = process_request.do_reset
 
-    project_model =await ProjectModel.create_instance(
+    project_model = await ProjectModel.create_instance(
         db_client=request.app.db_client
     )
 
@@ -133,7 +142,7 @@ async def process_endpoint(
                 "signal": ResponseSignal.PROCESSING_FAILED.value
             }
         )
-    chunk_model =await ChunkModel.create_instance(
+    chunk_model = await ChunkModel.create_instance(
         db_client=request.app.db_client
     )
 
